@@ -1,7 +1,11 @@
+.env
 __pycache__/
 *.py[cod]
+*.pyo
 *.egg-info/
 .venv/
 venv/
-.env
+
+# Generated agent outputs
 data/trending.json
+data/content_*.json
