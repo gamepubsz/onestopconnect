@@ -1,4 +1,4 @@
-.env
+# Python
 __pycache__/
 *.py[cod]
 *.pyo
@@ -6,8 +6,11 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+.env
 
 # Generated agent outputs
 data/cs_log.json
 data/trending.json
 data/content_*.json
+data/pipeline_log.json
+data/pipeline_log.json.tmp
