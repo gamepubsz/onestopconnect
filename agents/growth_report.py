@@ -9,8 +9,7 @@ Environment variables required:
     SHOPIFY_API_VERSION        optional, defaults to "2024-10"
     GROQ_API_KEY               Groq API key
     GROQ_MODEL                 optional, defaults to "llama-3.3-70b-versatile"
-    SLACK_BOT_TOKEN            Slack bot token (xoxb-...)
-    SLACK_CHANNEL              optional, defaults to "#reports"
+    SLACK_WEBHOOK_URL          Slack incoming webhook for the report channel
 """
 
 from __future__ import annotations
@@ -26,6 +25,13 @@ from typing import Any
 
 import requests
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(override=False)
+except ImportError:
+    pass
+
 ROOT = Path(__file__).resolve().parent.parent
 CS_LOG_PATH = ROOT / "data" / "cs_log.json"
 REPORTS_DIR = ROOT / "data" / "reports"
@@ -33,7 +39,34 @@ REPORTS_DIR = ROOT / "data" / "reports"
 DEFAULT_SHOPIFY_API_VERSION = "2024-10"
 DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-DEFAULT_SLACK_CHANNEL = "#reports"
+
+
+def startup_check() -> None:
+    """Print which env variables are loaded vs missing for this agent."""
+    required = [
+        "SHOPIFY_STORE",
+        "SHOPIFY_ACCESS_TOKEN",
+        "GROQ_API_KEY",
+        "SLACK_WEBHOOK_URL",
+    ]
+    optional = ["SHOPIFY_API_VERSION", "GROQ_MODEL"]
+
+    loaded = [name for name in required + optional if os.environ.get(name)]
+    missing_required = [name for name in required if not os.environ.get(name)]
+    missing_optional = [name for name in optional if not os.environ.get(name)]
+
+    print("=" * 60, file=sys.stderr)
+    print("[growth_report] startup env check", file=sys.stderr)
+    print(f"  loaded:           {', '.join(loaded) or '(none)'}", file=sys.stderr)
+    print(
+        f"  missing required: {', '.join(missing_required) or '(none)'}",
+        file=sys.stderr,
+    )
+    print(
+        f"  missing optional: {', '.join(missing_optional) or '(none)'}",
+        file=sys.stderr,
+    )
+    print("=" * 60, file=sys.stderr)
 
 
 @dataclass
@@ -187,8 +220,8 @@ def call_groq(prompt: str) -> str:
 
 
 def post_to_slack(header: str, body: str) -> None:
-    token = _require_env("SLACK_BOT_TOKEN")
-    channel = os.environ.get("SLACK_CHANNEL", DEFAULT_SLACK_CHANNEL)
+    """Post the report to Slack via SLACK_WEBHOOK_URL (incoming webhook)."""
+    webhook_url = _require_env("SLACK_WEBHOOK_URL")
     blocks = [
         {
             "type": "header",
@@ -200,18 +233,11 @@ def post_to_slack(header: str, body: str) -> None:
         },
     ]
     response = requests.post(
-        "https://slack.com/api/chat.postMessage",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json; charset=utf-8",
-        },
-        json={"channel": channel, "text": header, "blocks": blocks},
+        webhook_url,
+        json={"text": header, "blocks": blocks},
         timeout=30,
     )
     response.raise_for_status()
-    data = response.json()
-    if not data.get("ok"):
-        raise RuntimeError(f"Slack API error: {data.get('error')}")
 
 
 def save_report(date_str: str, content: str) -> Path:
@@ -222,6 +248,8 @@ def save_report(date_str: str, content: str) -> Path:
 
 
 def main() -> int:
+    startup_check()
+
     today = datetime.now(timezone.utc).date()
     date_str = today.isoformat()
     header = f"Weekly Report - {date_str}"

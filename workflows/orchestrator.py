@@ -17,10 +17,9 @@ Usage:
     python -m workflows.orchestrator --product "Foo" --url "https://..." --dry-run
 
 Slack credentials (used only when ``--dry-run`` is not set):
-    SLACK_BOT_TOKEN          Bot token with ``chat:write``. Preferred.
-                             Posts go to channel names ``#general`` / ``#errors``.
-    SLACK_WEBHOOK_GENERAL    Incoming webhook for ``#general`` (fallback).
-    SLACK_WEBHOOK_ERRORS     Incoming webhook for ``#errors``  (fallback).
+    SLACK_WEBHOOK_URL        Slack incoming webhook for both success and
+                             error notifications. Read via ``os.environ.get``
+                             so GitHub Actions secrets are picked up.
 
 If no credentials are configured the orchestrator logs a warning and continues;
 Slack delivery failures never break the pipeline result.
@@ -41,6 +40,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(override=False)
+except ImportError:
+    pass
+
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS_DIR = ROOT / "workflows"
 DATA_DIR = ROOT / "data"
@@ -53,7 +59,29 @@ GENERAL_CHANNEL = "#general"
 ERRORS_CHANNEL = "#errors"
 
 SLACK_TIMEOUT_S = 15
-SLACK_API_URL = "https://slack.com/api/chat.postMessage"
+
+
+def startup_check() -> None:
+    """Print which env variables are loaded vs missing for the orchestrator."""
+    required: list[str] = []
+    optional = ["SLACK_WEBHOOK_URL", "GROQ_API_KEY", "APIFY_API_TOKEN"]
+
+    loaded = [name for name in required + optional if os.environ.get(name)]
+    missing_required = [name for name in required if not os.environ.get(name)]
+    missing_optional = [name for name in optional if not os.environ.get(name)]
+
+    print("=" * 60, file=sys.stderr)
+    print("[orchestrator] startup env check", file=sys.stderr)
+    print(f"  loaded:           {', '.join(loaded) or '(none)'}", file=sys.stderr)
+    print(
+        f"  missing required: {', '.join(missing_required) or '(none)'}",
+        file=sys.stderr,
+    )
+    print(
+        f"  missing optional: {', '.join(missing_optional) or '(none)'}",
+        file=sys.stderr,
+    )
+    print("=" * 60, file=sys.stderr)
 
 
 def _utcnow() -> datetime:
@@ -65,56 +93,30 @@ def _iso(dt: datetime) -> str:
 
 
 def post_to_slack(channel: str, text: str, *, dry_run: bool = False) -> dict[str, Any]:
-    """Post ``text`` to a Slack ``channel``.
+    """Post ``text`` to Slack via the ``SLACK_WEBHOOK_URL`` incoming webhook.
 
-    Returns a small dict describing the delivery attempt; never raises.
+    The ``channel`` argument is preserved in the returned metadata for
+    bookkeeping (success vs error) but Slack incoming webhooks always
+    deliver to the channel configured on the webhook itself. Returns a
+    small dict describing the delivery attempt; never raises.
     """
     if dry_run:
         print(f"[DRY-RUN] Slack -> {channel}:\n{text}")
         return {"channel": channel, "delivered": False, "reason": "dry-run"}
 
-    bot_token = os.environ.get("SLACK_BOT_TOKEN")
-    if bot_token:
-        payload = json.dumps({"channel": channel, "text": text}).encode("utf-8")
-        req = urllib.request.Request(
-            SLACK_API_URL,
-            data=payload,
-            headers={
-                "Content-Type": "application/json; charset=utf-8",
-                "Authorization": f"Bearer {bot_token}",
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=SLACK_TIMEOUT_S) as resp:
-                body = json.loads(resp.read().decode("utf-8") or "{}")
-            if body.get("ok"):
-                return {"channel": channel, "delivered": True, "via": "bot_token"}
-            return {
-                "channel": channel,
-                "delivered": False,
-                "via": "bot_token",
-                "error": body.get("error", "unknown"),
-            }
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
-            return {"channel": channel, "delivered": False, "via": "bot_token", "error": str(e)}
-
-    webhook_env = {
-        GENERAL_CHANNEL: "SLACK_WEBHOOK_GENERAL",
-        ERRORS_CHANNEL: "SLACK_WEBHOOK_ERRORS",
-    }.get(channel)
-    webhook_url = os.environ.get(webhook_env) if webhook_env else None
+    webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
     if not webhook_url:
         msg = (
             "No Slack credentials configured "
-            f"(set SLACK_BOT_TOKEN or {webhook_env}). Skipping post to {channel}."
+            f"(set SLACK_WEBHOOK_URL). Skipping post for {channel}."
         )
         print(msg, file=sys.stderr)
         return {"channel": channel, "delivered": False, "reason": "no_credentials"}
 
+    body_text = f"[{channel}] {text}"
     req = urllib.request.Request(
         webhook_url,
-        data=json.dumps({"text": text}).encode("utf-8"),
+        data=json.dumps({"text": body_text}).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
@@ -123,7 +125,12 @@ def post_to_slack(channel: str, text: str, *, dry_run: bool = False) -> dict[str
             resp.read()
         return {"channel": channel, "delivered": True, "via": "webhook"}
     except (urllib.error.URLError, TimeoutError) as e:
-        return {"channel": channel, "delivered": False, "via": "webhook", "error": str(e)}
+        return {
+            "channel": channel,
+            "delivered": False,
+            "via": "webhook",
+            "error": str(e),
+        }
 
 
 def run_step(
@@ -261,6 +268,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+
+    startup_check()
 
     started = _utcnow()
     run_id = started.strftime("%Y%m%dT%H%M%SZ")

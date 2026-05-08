@@ -12,8 +12,7 @@ Required environment variables:
   SHOPIFY_ACCESS_TOKEN     Shopify Admin API access token (X-Shopify-Access-Token)
   SHOPIFY_STORE_DOMAIN     The store domain, e.g. "my-shop.myshopify.com"
   SHOPIFY_API_VERSION      Optional, defaults to "2024-10"
-  SLACK_BOT_TOKEN          Slack bot token (chat:write scope) for #store-ops
-  SLACK_CHANNEL            Optional, defaults to "#store-ops"
+  SLACK_WEBHOOK_URL        Slack incoming webhook URL for #store-ops notifications
   LINEAR_API_KEY           Linear personal API key
   LINEAR_TEAM_ID           Linear team ID (UUID) where the issue should be created
 
@@ -36,6 +35,13 @@ from typing import Any
 
 import requests
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(override=False)
+except ImportError:
+    pass
+
 logger = logging.getLogger("store_ops")
 
 
@@ -44,8 +50,36 @@ DATA_DIR = REPO_ROOT / "data"
 PRODUCTS_FILE = DATA_DIR / "products.json"
 
 DEFAULT_SHOPIFY_API_VERSION = "2024-10"
-DEFAULT_SLACK_CHANNEL = "#store-ops"
 HTTP_TIMEOUT = 30
+
+
+def startup_check() -> None:
+    """Print which env variables are loaded vs missing for this agent."""
+    required = [
+        "SHOPIFY_ACCESS_TOKEN",
+        "SHOPIFY_STORE_DOMAIN",
+        "SLACK_WEBHOOK_URL",
+        "LINEAR_API_KEY",
+        "LINEAR_TEAM_ID",
+    ]
+    optional = ["SHOPIFY_API_VERSION"]
+
+    loaded = [name for name in required + optional if os.environ.get(name)]
+    missing_required = [name for name in required if not os.environ.get(name)]
+    missing_optional = [name for name in optional if not os.environ.get(name)]
+
+    print("=" * 60, file=sys.stderr)
+    print("[store_ops] startup env check", file=sys.stderr)
+    print(f"  loaded:           {', '.join(loaded) or '(none)'}", file=sys.stderr)
+    print(
+        f"  missing required: {', '.join(missing_required) or '(none)'}",
+        file=sys.stderr,
+    )
+    print(
+        f"  missing optional: {', '.join(missing_optional) or '(none)'}",
+        file=sys.stderr,
+    )
+    print("=" * 60, file=sys.stderr)
 
 
 class StoreOpsError(Exception):
@@ -236,23 +270,17 @@ def create_shopify_draft(
 
 
 def post_to_slack(product_name: str, draft_url: str) -> None:
-    """Post the draft Shopify URL to the Slack channel."""
-    token = _require_env("SLACK_BOT_TOKEN")
-    channel = os.environ.get("SLACK_CHANNEL", DEFAULT_SLACK_CHANNEL)
+    """Post the draft Shopify URL to Slack via SLACK_WEBHOOK_URL."""
+    webhook_url = _require_env("SLACK_WEBHOOK_URL")
     text = (
         f":sparkles: New Shopify draft product ready for review: *{product_name}*\n"
         f"{draft_url}"
     )
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json; charset=utf-8",
-    }
-    payload = {"channel": channel, "text": text, "unfurl_links": True}
+    payload = {"text": text}
 
     try:
         response = requests.post(
-            "https://slack.com/api/chat.postMessage",
-            headers=headers,
+            webhook_url,
             json=payload,
             timeout=HTTP_TIMEOUT,
         )
@@ -264,15 +292,7 @@ def post_to_slack(product_name: str, draft_url: str) -> None:
             f"Slack returned HTTP {response.status_code}: {response.text}"
         )
 
-    try:
-        body = response.json()
-    except ValueError as exc:
-        raise SlackError(f"Slack response was not valid JSON: {response.text}") from exc
-
-    if not body.get("ok"):
-        raise SlackError(f"Slack API error: {body.get('error', body)!r}")
-
-    logger.info("Posted draft URL to Slack channel %s", channel)
+    logger.info("Posted draft URL to Slack via incoming webhook")
 
 
 def create_linear_issue(product_name: str, draft_url: str) -> str:
@@ -452,6 +472,7 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    startup_check()
     try:
         result = run(args.product_name)
     except ConfigError as exc:

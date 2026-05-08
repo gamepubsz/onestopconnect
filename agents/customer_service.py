@@ -14,8 +14,7 @@ Environment variables (all optional - the agent degrades gracefully):
     SHOPIFY_STORE         - Shopify store domain, e.g. my-shop.myshopify.com.
     SHOPIFY_ACCESS_TOKEN  - Shopify Admin API access token.
     SHOPIFY_API_VERSION   - Shopify Admin API version (default: 2024-07).
-    SLACK_BOT_TOKEN       - Slack bot token used to post escalations.
-    SLACK_ESCALATION_CHANNEL - Channel name (default: #cs-escalations).
+    SLACK_WEBHOOK_URL     - Slack incoming webhook used to post escalations.
 """
 
 from __future__ import annotations
@@ -35,8 +34,48 @@ try:
 except ImportError:
     requests = None
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(override=False)
+except ImportError:
+    pass
+
 
 LOG_PATH = Path(__file__).resolve().parent.parent / "data" / "cs_log.json"
+
+
+def startup_check() -> None:
+    """Print which env variables are loaded vs missing for this agent.
+
+    Reads via ``os.environ.get`` so values set by GitHub Actions secrets are
+    visible even when no ``.env`` file exists.
+    """
+    required: list[str] = []
+    optional = [
+        "GROQ_API_KEY",
+        "GROQ_MODEL",
+        "SHOPIFY_STORE",
+        "SHOPIFY_ACCESS_TOKEN",
+        "SHOPIFY_API_VERSION",
+        "SLACK_WEBHOOK_URL",
+    ]
+    loaded = [name for name in required + optional if os.environ.get(name)]
+    missing_required = [name for name in required if not os.environ.get(name)]
+    missing_optional = [name for name in optional if not os.environ.get(name)]
+
+    print("=" * 60, file=sys.stderr)
+    print("[customer_service] startup env check", file=sys.stderr)
+    print(f"  loaded:           {', '.join(loaded) or '(none)'}", file=sys.stderr)
+    print(
+        f"  missing required: {', '.join(missing_required) or '(none)'}",
+        file=sys.stderr,
+    )
+    print(
+        f"  missing optional: {', '.join(missing_optional) or '(none)'}",
+        file=sys.stderr,
+    )
+    print("=" * 60, file=sys.stderr)
 
 CATEGORIES = (
     "shipping_query",
@@ -300,17 +339,18 @@ def call_groq(category: str, subject: str, body: str) -> str:
 
 
 def post_to_slack(subject: str, body: str, from_email: str | None) -> bool:
-    """Post the full inbound email to the escalation channel.
+    """Post the full inbound email to the Slack escalation webhook.
 
-    Returns True if Slack accepted the message, False otherwise.
+    Uses ``SLACK_WEBHOOK_URL`` (incoming webhook) so the same secret works
+    in local dev and GitHub Actions. Returns True if Slack accepted the
+    message, False otherwise.
     """
 
-    token = os.environ.get("SLACK_BOT_TOKEN")
-    channel = os.environ.get("SLACK_ESCALATION_CHANNEL", "#cs-escalations")
+    webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
 
-    if not token or requests is None:
+    if not webhook_url or requests is None:
         print(
-            f"[slack] would escalate to {channel} (token / requests unavailable)",
+            "[slack] would escalate (SLACK_WEBHOOK_URL / requests unavailable)",
             file=sys.stderr,
         )
         return False
@@ -324,19 +364,12 @@ def post_to_slack(subject: str, body: str, from_email: str | None) -> bool:
 
     try:
         response = requests.post(
-            "https://slack.com/api/chat.postMessage",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json; charset=utf-8",
-            },
-            json={"channel": channel, "text": text},
+            webhook_url,
+            json={"text": text},
             timeout=15,
         )
         response.raise_for_status()
-        ok = bool(response.json().get("ok"))
-        if not ok:
-            print(f"[slack] post failed: {response.text}", file=sys.stderr)
-        return ok
+        return True
     except Exception as exc:
         print(f"[slack] post failed: {exc}", file=sys.stderr)
         return False
@@ -451,6 +484,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
+
+    startup_check()
 
     body = args.body if args.body is not None else sys.stdin.read()
     handle_email(args.subject, body, args.from_email)

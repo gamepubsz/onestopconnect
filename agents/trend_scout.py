@@ -8,10 +8,11 @@ Run as a standalone script:
 
     python agents/trend_scout.py
 
-Required environment variables (loaded from a ``.env`` file via
-``python-dotenv``):
+Required environment variables (read via ``os.environ.get`` so GitHub
+Actions secrets work; ``python-dotenv`` is used to populate the
+environment from a local ``.env`` file when present):
 
-* ``APIFY_TOKEN``        - Apify API token used to authenticate the client.
+* ``APIFY_API_TOKEN``    - Apify API token used to authenticate the client.
 * ``SLACK_WEBHOOK_URL``  - Slack incoming webhook URL to post results to.
 
 Optional environment variables:
@@ -34,7 +35,35 @@ from typing import Any, Iterable
 
 import requests
 from apify_client import ApifyClient
-from dotenv import load_dotenv
+
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def load_dotenv(*args: Any, **kwargs: Any) -> bool:  # type: ignore[no-redef]
+        return False
+
+
+def startup_check() -> None:
+    """Print which env variables are loaded vs missing for this agent."""
+    required = ["APIFY_API_TOKEN", "SLACK_WEBHOOK_URL"]
+    optional = ["APIFY_TIKTOK_ACTOR", "TIKTOK_HASHTAGS", "RESULTS_PER_HASHTAG"]
+
+    loaded = [name for name in required + optional if os.environ.get(name)]
+    missing_required = [name for name in required if not os.environ.get(name)]
+    missing_optional = [name for name in optional if not os.environ.get(name)]
+
+    print("=" * 60, file=sys.stderr)
+    print("[trend_scout] startup env check", file=sys.stderr)
+    print(f"  loaded:           {', '.join(loaded) or '(none)'}", file=sys.stderr)
+    print(
+        f"  missing required: {', '.join(missing_required) or '(none)'}",
+        file=sys.stderr,
+    )
+    print(
+        f"  missing optional: {', '.join(missing_optional) or '(none)'}",
+        file=sys.stderr,
+    )
+    print("=" * 60, file=sys.stderr)
 
 
 DEFAULT_HASHTAGS: tuple[str, ...] = ("TikTokMadeMeBuyIt", "aestheticfinds")
@@ -237,22 +266,26 @@ def _parse_hashtags_env(raw: str | None) -> tuple[str, ...]:
 
 
 def main() -> int:
-    load_dotenv()
+    load_dotenv(override=False)
+    startup_check()
 
-    apify_token = os.getenv("APIFY_TOKEN")
-    slack_webhook = os.getenv("SLACK_WEBHOOK_URL")
+    apify_token = os.environ.get("APIFY_API_TOKEN")
+    slack_webhook = os.environ.get("SLACK_WEBHOOK_URL")
     if not apify_token:
-        print("ERROR: APIFY_TOKEN is not set in the environment.", file=sys.stderr)
+        print(
+            "ERROR: APIFY_API_TOKEN is not set in the environment.",
+            file=sys.stderr,
+        )
         return 1
     if not slack_webhook:
         print("ERROR: SLACK_WEBHOOK_URL is not set in the environment.", file=sys.stderr)
         return 1
 
-    actor_id = os.getenv("APIFY_TIKTOK_ACTOR", DEFAULT_ACTOR_ID)
-    hashtags = _parse_hashtags_env(os.getenv("TIKTOK_HASHTAGS"))
+    actor_id = os.environ.get("APIFY_TIKTOK_ACTOR", DEFAULT_ACTOR_ID)
+    hashtags = _parse_hashtags_env(os.environ.get("TIKTOK_HASHTAGS"))
     try:
         results_per_hashtag = int(
-            os.getenv("RESULTS_PER_HASHTAG", str(DEFAULT_RESULTS_PER_HASHTAG))
+            os.environ.get("RESULTS_PER_HASHTAG", str(DEFAULT_RESULTS_PER_HASHTAG))
         )
     except ValueError:
         results_per_hashtag = DEFAULT_RESULTS_PER_HASHTAG
