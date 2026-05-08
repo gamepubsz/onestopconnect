@@ -1,4 +1,13 @@
-__pycache__/
-*.pyc
-.venv/
 .env
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyc
+*.egg-info/
+.venv/
+venv/
+
+# Generated agent outputs
+data/cs_log.json
+data/trending.json
+data/content_*.json

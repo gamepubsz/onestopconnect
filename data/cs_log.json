@@ -1,9 +1,0 @@
-{
-  "tickets": [
-    {"id": "T-1001", "status": "auto_resolved", "topic": "order status"},
-    {"id": "T-1002", "status": "auto_resolved", "topic": "shipping address change"},
-    {"id": "T-1003", "status": "escalated", "topic": "damaged item"},
-    {"id": "T-1004", "status": "auto_resolved", "topic": "refund policy"},
-    {"id": "T-1005", "status": "escalated", "topic": "missing order"}
-  ]
-}

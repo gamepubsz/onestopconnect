@@ -144,12 +144,11 @@ def read_cs_metrics(path: Path = CS_LOG_PATH) -> CsMetrics:
         status = str(ticket.get("status") or ticket.get("resolution") or "").lower()
         if ticket.get("escalated") is True or "escalat" in status:
             esc += 1
-        elif ticket.get("auto_resolved") is True or status in {
-            "auto_resolved",
-            "auto-resolved",
-            "resolved",
-            "auto",
-        }:
+        elif (
+            ticket.get("auto_resolved") is True
+            or ticket.get("auto_reply") is True
+            or status in {"auto_resolved", "auto-resolved", "resolved", "auto"}
+        ):
             auto += 1
     return CsMetrics(auto_resolved=auto, escalated=esc, total=len(tickets))
 
