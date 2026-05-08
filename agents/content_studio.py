@@ -26,7 +26,6 @@ logger = logging.getLogger("content_studio")
 
 
 MODEL = "llama-3.3-70b-versatile"
-GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
 SYSTEM_PROMPT = (
     "You are a copywriter for HoeshaHome, a trendy lifestyle brand. "
@@ -94,7 +93,7 @@ def generate_content(
             "groq SDK is not installed. Run: pip install groq"
         ) from exc
 
-    client = groq.Groq(api_key=api_key, base_url=GROQ_BASE_URL)
+    client = groq.Groq(api_key=api_key)
 
     user_text = USER_PROMPT_TEMPLATE.format(
         product_name=product_name,

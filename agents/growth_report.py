@@ -32,7 +32,6 @@ REPORTS_DIR = ROOT / "data" / "reports"
 
 DEFAULT_SHOPIFY_API_VERSION = "2024-10"
 DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
-GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 DEFAULT_SLACK_CHANNEL = "#reports"
 
 
@@ -177,7 +176,7 @@ def call_groq(prompt: str) -> str:
 
     api_key = _require_env("GROQ_API_KEY")
     model = os.environ.get("GROQ_MODEL", DEFAULT_GROQ_MODEL)
-    client = groq.Groq(api_key=api_key, base_url=GROQ_BASE_URL)
+    client = groq.Groq(api_key=api_key)
     response = client.chat.completions.create(
         model=model,
         max_tokens=600,

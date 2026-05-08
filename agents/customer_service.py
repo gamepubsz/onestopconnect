@@ -272,10 +272,7 @@ def call_groq(category: str, subject: str, body: str) -> str:
     )
 
     try:
-        client = groq.Groq(
-            api_key=api_key,
-            base_url="https://api.groq.com/openai/v1",
-        )
+        client = groq.Groq(api_key=api_key)
         response = client.chat.completions.create(
             model=model,
             max_tokens=600,
