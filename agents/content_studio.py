@@ -63,21 +63,67 @@ class ContentStudioError(Exception):
 
 
 def _load_env() -> str:
-    """Load .env and return GROQ_API_KEY. Raises ContentStudioError if missing."""
+    """Return GROQ_API_KEY from the environment, raising if missing.
+
+    Loads variables from a local ``.env`` file when ``python-dotenv`` is
+    available, but always reads the final value via ``os.environ.get`` so
+    GitHub Actions secrets (which are exposed as real environment variables)
+    take precedence.
+    """
     try:
         from dotenv import load_dotenv
-    except ImportError as exc:
-        raise ContentStudioError(
-            "python-dotenv is not installed. Run: pip install python-dotenv"
-        ) from exc
 
-    load_dotenv()
-    api_key = os.getenv("GROQ_API_KEY")
+        load_dotenv(override=False)
+    except ImportError:
+        pass
+
+    api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
         raise ContentStudioError(
-            "GROQ_API_KEY is not set. Add it to your .env file."
+            "GROQ_API_KEY is not set. Set it as an environment variable "
+            "(GitHub Actions secret) or add it to .env."
         )
     return api_key
+
+
+def startup_check() -> None:
+    """Print which env variables are loaded vs missing for this agent.
+
+    Reads the environment via ``os.environ.get`` so that values supplied by
+    GitHub Actions (which sets real env vars) are visible even when no
+    ``.env`` file exists.
+    """
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(override=False)
+    except ImportError:
+        pass
+
+    required = ["GROQ_API_KEY"]
+    optional = [
+        "GROQ_MODEL",
+        "SLACK_WEBHOOK_URL",
+        "SLACK_BOT_TOKEN",
+        "SLACK_CONTENT_REVIEW_CHANNEL",
+    ]
+
+    loaded = [name for name in required + optional if os.environ.get(name)]
+    missing_required = [name for name in required if not os.environ.get(name)]
+    missing_optional = [name for name in optional if not os.environ.get(name)]
+
+    print("=" * 60, file=sys.stderr)
+    print("[content_studio] startup env check", file=sys.stderr)
+    print(f"  loaded:           {', '.join(loaded) or '(none)'}", file=sys.stderr)
+    print(
+        f"  missing required: {', '.join(missing_required) or '(none)'}",
+        file=sys.stderr,
+    )
+    print(
+        f"  missing optional: {', '.join(missing_optional) or '(none)'}",
+        file=sys.stderr,
+    )
+    print("=" * 60, file=sys.stderr)
 
 
 def generate_content(
@@ -201,26 +247,20 @@ def save_content(
 
 
 def post_to_slack(product_name: str, content: dict[str, str]) -> bool:
-    """Post the IG caption and TikTok hook to Slack #content-review.
+    """Post the IG caption and TikTok hook to Slack via SLACK_WEBHOOK_URL.
 
-    Prefers SLACK_BOT_TOKEN + chat.postMessage; falls back to SLACK_WEBHOOK_URL.
     Returns True on success, False on (logged) failure. Slack failures do not
     abort the pipeline because the content has already been generated and saved.
     """
-    channel = os.getenv("SLACK_CONTENT_REVIEW_CHANNEL", "#content-review")
     text = (
         f"*New content for review:* {product_name}\n\n"
         f"*Instagram caption*\n{content['instagram_caption']}\n\n"
         f"*TikTok hook*\n{content['tiktok_hook']}"
     )
 
-    bot_token = os.getenv("SLACK_BOT_TOKEN")
-    webhook_url = os.getenv("SLACK_WEBHOOK_URL")
-
-    if not bot_token and not webhook_url:
-        logger.warning(
-            "Skipping Slack post: neither SLACK_BOT_TOKEN nor SLACK_WEBHOOK_URL is set."
-        )
+    webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
+    if not webhook_url:
+        logger.warning("Skipping Slack post: SLACK_WEBHOOK_URL is not set.")
         return False
 
     try:
@@ -230,24 +270,6 @@ def post_to_slack(product_name: str, content: dict[str, str]) -> bool:
         return False
 
     try:
-        if bot_token:
-            response = requests.post(
-                "https://slack.com/api/chat.postMessage",
-                headers={
-                    "Authorization": f"Bearer {bot_token}",
-                    "Content-Type": "application/json; charset=utf-8",
-                },
-                json={"channel": channel, "text": text},
-                timeout=15,
-            )
-            response.raise_for_status()
-            data = response.json()
-            if not data.get("ok"):
-                logger.error("Slack API error: %s", data.get("error", "unknown"))
-                return False
-            logger.info("Posted to Slack channel %s", channel)
-            return True
-
         response = requests.post(
             webhook_url,
             json={"text": text},
@@ -332,6 +354,8 @@ def main(argv: list[str] | None = None) -> int:
         level=getattr(logging, args.log_level),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+    startup_check()
 
     try:
         result = run(
