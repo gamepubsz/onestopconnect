@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
 """Pipeline orchestrator.
 
-Runs ``content_studio.py`` and then ``store_ops.py`` for a given product, posts
-a summary to Slack ``#general`` on success, posts the full traceback to Slack
-``#errors`` on failure, and appends a structured record of every run to
-``data/pipeline_log.json``.
+Runs ``agents/content_studio.py`` and then ``agents/store_ops.py`` for a given
+product, posts a summary to Slack ``#general`` on success, posts the full
+traceback to Slack ``#errors`` on failure, and appends a structured record of
+every run to ``data/pipeline_log.json``.
 
 This is the script that n8n triggers via webhook when a product is approved.
 
 Usage:
-    python -m workflows.orchestrator --product "Wireless Earbuds" \
-        --url "https://www.aliexpress.com/item/1005001234567890.html"
+    python -m workflows.orchestrator \
+        --product "Wireless Earbuds" \
+        --url "https://www.aliexpress.com/item/1005001234567890.html" \
+        --image-url "https://cdn.example.com/wireless-earbuds.jpg"
 
     # Dry-run: prints every step (including Slack messages) without
-    # invoking the step scripts or hitting any external APIs.
+    # invoking the step scripts or hitting any external APIs. ``--image-url``
+    # is optional in this mode.
     python -m workflows.orchestrator --product "Foo" --url "https://..." --dry-run
+
+Per-step CLI shapes (handled by ``build_step_args``):
+    content_studio  --product P --url U --image-url I
+    store_ops       <product_name>          # positional, no flags
 
 Slack credentials (used only when ``--dry-run`` is not set):
     SLACK_WEBHOOK_URL        Slack incoming webhook for both success and
@@ -49,11 +56,12 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS_DIR = ROOT / "workflows"
+AGENTS_DIR = ROOT / "agents"
 DATA_DIR = ROOT / "data"
 LOG_FILE = DATA_DIR / "pipeline_log.json"
 
-CONTENT_STUDIO = WORKFLOWS_DIR / "content_studio.py"
-STORE_OPS = WORKFLOWS_DIR / "store_ops.py"
+CONTENT_STUDIO = AGENTS_DIR / "content_studio.py"
+STORE_OPS = AGENTS_DIR / "store_ops.py"
 
 GENERAL_CHANNEL = "#general"
 ERRORS_CHANNEL = "#errors"
@@ -256,14 +264,46 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--url",
         required=True,
-        help="AliExpress product URL",
+        help="Product source URL (AliExpress product page, TikTok video, etc.)",
+    )
+    parser.add_argument(
+        "--image-url",
+        default=None,
+        help=(
+            "Public URL of the product image. Required by content_studio in "
+            "real (non-dry-run) execution; optional with --dry-run."
+        ),
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print steps without calling APIs or running step scripts.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+
+    if not args.dry_run and not args.image_url:
+        parser.error(
+            "--image-url is required when --dry-run is not set "
+            "(content_studio refuses to run without an image URL)."
+        )
+
+    return args
+
+
+def build_step_args(step_name: str, args: argparse.Namespace) -> list[str]:
+    """Build the CLI args for a single step from the orchestrator namespace.
+
+    Each step script has its own argument shape; this function is the single
+    place that translates the orchestrator's interface into per-step flags.
+    """
+    if step_name == "content_studio":
+        cli = ["--product", args.product, "--url", args.url]
+        image_url = args.image_url or "<dry-run-placeholder>"
+        cli.extend(["--image-url", image_url])
+        return cli
+    if step_name == "store_ops":
+        return [args.product]
+    raise ValueError(f"Unknown pipeline step: {step_name!r}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -273,14 +313,12 @@ def main(argv: list[str] | None = None) -> int:
 
     started = _utcnow()
     run_id = started.strftime("%Y%m%dT%H%M%SZ")
-    step_args = ["--product", args.product, "--url", args.url]
-    if args.dry_run:
-        step_args.append("--dry-run")
 
     entry: dict[str, Any] = {
         "run_id": run_id,
         "product": args.product,
         "url": args.url,
+        "image_url": args.image_url,
         "dry_run": args.dry_run,
         "started_at": _iso(started),
         "status": "running",
@@ -295,6 +333,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for step_name, script in steps:
             print(f"==> Running {step_name}...")
+            step_args = build_step_args(step_name, args)
             result = run_step(step_name, script, step_args, dry_run=args.dry_run)
             entry["steps"].append(result)
             print(f"    {step_name}: {result['status']} ({result['duration_s']}s)")
