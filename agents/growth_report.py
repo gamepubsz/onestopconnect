@@ -1,14 +1,14 @@
 """Weekly CEO growth report agent.
 
-Pulls last 7 days of Shopify data, reads CS ticket log, asks Claude to write a
+Pulls last 7 days of Shopify data, reads CS ticket log, asks Groq to write a
 brief CEO-style summary, posts it to Slack, and saves it to disk.
 
 Environment variables required:
     SHOPIFY_STORE              e.g. "my-shop.myshopify.com"
     SHOPIFY_ACCESS_TOKEN       Shopify Admin API access token
     SHOPIFY_API_VERSION        optional, defaults to "2024-10"
-    ANTHROPIC_API_KEY          Claude API key
-    ANTHROPIC_MODEL            optional, defaults to "claude-sonnet-4-5"
+    GROQ_API_KEY               Groq API key
+    GROQ_MODEL                 optional, defaults to "llama-3.3-70b-versatile"
     SLACK_BOT_TOKEN            Slack bot token (xoxb-...)
     SLACK_CHANNEL              optional, defaults to "#reports"
 """
@@ -31,7 +31,8 @@ CS_LOG_PATH = ROOT / "data" / "cs_log.json"
 REPORTS_DIR = ROOT / "data" / "reports"
 
 DEFAULT_SHOPIFY_API_VERSION = "2024-10"
-DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-5"
+DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 DEFAULT_SLACK_CHANNEL = "#reports"
 
 
@@ -153,7 +154,7 @@ def read_cs_metrics(path: Path = CS_LOG_PATH) -> CsMetrics:
     return CsMetrics(auto_resolved=auto, escalated=esc, total=len(tickets))
 
 
-def build_claude_prompt(shopify: ShopifyMetrics, cs: CsMetrics) -> str:
+def build_groq_prompt(shopify: ShopifyMetrics, cs: CsMetrics) -> str:
     payload = {
         "shopify_last_7_days": asdict(shopify),
         "customer_support_last_7_days": asdict(cs),
@@ -166,28 +167,23 @@ def build_claude_prompt(shopify: ShopifyMetrics, cs: CsMetrics) -> str:
     )
 
 
-def call_claude(prompt: str) -> str:
-    api_key = _require_env("ANTHROPIC_API_KEY")
-    model = os.environ.get("ANTHROPIC_MODEL", DEFAULT_CLAUDE_MODEL)
-    response = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        json={
-            "model": model,
-            "max_tokens": 600,
-            "messages": [{"role": "user", "content": prompt}],
-        },
-        timeout=60,
+def call_groq(prompt: str) -> str:
+    try:
+        import groq
+    except ImportError as exc:
+        raise RuntimeError(
+            "groq SDK is not installed. Run: pip install groq"
+        ) from exc
+
+    api_key = _require_env("GROQ_API_KEY")
+    model = os.environ.get("GROQ_MODEL", DEFAULT_GROQ_MODEL)
+    client = groq.Groq(api_key=api_key, base_url=GROQ_BASE_URL)
+    response = client.chat.completions.create(
+        model=model,
+        max_tokens=600,
+        messages=[{"role": "user", "content": prompt}],
     )
-    response.raise_for_status()
-    body = response.json()
-    parts = body.get("content") or []
-    text_parts = [p.get("text", "") for p in parts if p.get("type") == "text"]
-    return "\n".join(t for t in text_parts if t).strip()
+    return (response.choices[0].message.content or "").strip()
 
 
 def post_to_slack(header: str, body: str) -> None:
@@ -233,8 +229,8 @@ def main() -> int:
     shopify = fetch_shopify_metrics(days=7)
     cs = read_cs_metrics()
 
-    prompt = build_claude_prompt(shopify, cs)
-    report = call_claude(prompt)
+    prompt = build_groq_prompt(shopify, cs)
+    report = call_groq(prompt)
 
     out_path = save_report(date_str, report)
     print(f"Saved report to {out_path}")
