@@ -9,8 +9,8 @@ Usage:
         --from-email customer@example.com
 
 Environment variables (all optional - the agent degrades gracefully):
-    ANTHROPIC_API_KEY     - Used to call Claude for product questions / complaints.
-    ANTHROPIC_MODEL       - Override the Claude model (default: claude-3-5-sonnet-latest).
+    GROQ_API_KEY          - Used to call Groq for product questions / complaints.
+    GROQ_MODEL            - Override the Groq model (default: llama-3.3-70b-versatile).
     SHOPIFY_STORE         - Shopify store domain, e.g. my-shop.myshopify.com.
     SHOPIFY_ACCESS_TOKEN  - Shopify Admin API access token.
     SHOPIFY_API_VERSION   - Shopify Admin API version (default: 2024-07).
@@ -229,13 +229,18 @@ def build_shipping_reply(order: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
-def call_claude(category: str, subject: str, body: str) -> str:
-    """Generate a reply with the Claude API for product questions / complaints."""
+def call_groq(category: str, subject: str, body: str) -> str:
+    """Generate a reply with the Groq API for product questions / complaints."""
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    model = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
+    api_key = os.environ.get("GROQ_API_KEY")
+    model = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 
-    if not api_key or requests is None:
+    try:
+        import groq  # type: ignore
+    except ImportError:
+        groq = None  # type: ignore
+
+    if not api_key or groq is None:
         return (
             "Hi there,\n\n"
             "Thanks for getting in touch. A member of our team will follow up "
@@ -267,30 +272,23 @@ def call_claude(category: str, subject: str, body: str) -> str:
     )
 
     try:
-        response = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": model,
-                "max_tokens": 600,
-                "system": system_prompt,
-                "messages": [{"role": "user", "content": user_prompt}],
-            },
-            timeout=30,
+        client = groq.Groq(
+            api_key=api_key,
+            base_url="https://api.groq.com/openai/v1",
         )
-        response.raise_for_status()
-        payload = response.json()
-        parts = payload.get("content", [])
-        text_parts = [p.get("text", "") for p in parts if p.get("type") == "text"]
-        reply = "\n".join(t for t in text_parts if t).strip()
+        response = client.chat.completions.create(
+            model=model,
+            max_tokens=600,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        reply = (response.choices[0].message.content or "").strip()
         if reply:
             return reply
     except Exception as exc:
-        print(f"[claude] generation failed: {exc}", file=sys.stderr)
+        print(f"[groq] generation failed: {exc}", file=sys.stderr)
 
     return (
         "Hi there,\n\n"
@@ -392,7 +390,7 @@ def handle_email(
         reply = RETURN_POLICY_REPLY
         auto_reply = True
     elif category in {"product_question", "complaint"}:
-        reply = call_claude(category, subject, body)
+        reply = call_groq(category, subject, body)
         auto_reply = True
     else:
         escalated = post_to_slack(subject, body, from_email)

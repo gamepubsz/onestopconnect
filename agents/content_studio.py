@@ -1,7 +1,7 @@
 """HoeshaHome Content Studio agent.
 
 Generates on-brand marketing copy (Instagram caption, TikTok hook, product page
-description) for a product using Claude, saves the result to disk, and posts the
+description) for a product using Groq, saves the result to disk, and posts the
 short-form copy to the Slack #content-review channel.
 
 Usage:
@@ -25,7 +25,8 @@ from typing import Any
 logger = logging.getLogger("content_studio")
 
 
-MODEL = "claude-sonnet-4-20250514"
+MODEL = "llama-3.3-70b-versatile"
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
 SYSTEM_PROMPT = (
     "You are a copywriter for HoeshaHome, a trendy lifestyle brand. "
@@ -62,7 +63,7 @@ class ContentStudioError(Exception):
 
 
 def _load_env() -> str:
-    """Load .env and return ANTHROPIC_API_KEY. Raises ContentStudioError if missing."""
+    """Load .env and return GROQ_API_KEY. Raises ContentStudioError if missing."""
     try:
         from dotenv import load_dotenv
     except ImportError as exc:
@@ -71,24 +72,12 @@ def _load_env() -> str:
         ) from exc
 
     load_dotenv()
-    api_key = os.getenv("ANTHROPIC_API_KEY")
+    api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         raise ContentStudioError(
-            "ANTHROPIC_API_KEY is not set. Add it to your .env file."
+            "GROQ_API_KEY is not set. Add it to your .env file."
         )
     return api_key
-
-
-def _build_image_block(image_url: str) -> dict[str, Any]:
-    """Build a Claude content block referencing an image by URL.
-
-    Falls back to a text mention of the URL if the image cannot be referenced
-    (handled by the caller on API errors).
-    """
-    return {
-        "type": "image",
-        "source": {"type": "url", "url": image_url},
-    }
 
 
 def generate_content(
@@ -97,15 +86,15 @@ def generate_content(
     product_url: str,
     image_url: str,
 ) -> dict[str, str]:
-    """Call Claude and return the parsed content dict."""
+    """Call Groq and return the parsed content dict."""
     try:
-        import anthropic
+        import groq
     except ImportError as exc:
         raise ContentStudioError(
-            "anthropic SDK is not installed. Run: pip install anthropic"
+            "groq SDK is not installed. Run: pip install groq"
         ) from exc
 
-    client = anthropic.Anthropic(api_key=api_key)
+    client = groq.Groq(api_key=api_key, base_url=GROQ_BASE_URL)
 
     user_text = USER_PROMPT_TEMPLATE.format(
         product_name=product_name,
@@ -113,44 +102,20 @@ def generate_content(
         image_url=image_url,
     )
 
-    user_content: list[dict[str, Any]] = [{"type": "text", "text": user_text}]
-    if image_url:
-        user_content.insert(0, _build_image_block(image_url))
-
-    def _call(content_blocks: list[dict[str, Any]]) -> str:
-        response = client.messages.create(
+    try:
+        response = client.chat.completions.create(
             model=MODEL,
             max_tokens=2048,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": content_blocks}],
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_text},
+            ],
         )
-        parts = [
-            block.text
-            for block in response.content
-            if getattr(block, "type", None) == "text"
-        ]
-        return "\n".join(parts).strip()
-
-    try:
-        raw_text = _call(user_content)
-    except anthropic.APIStatusError as exc:
-        if image_url:
-            logger.warning(
-                "Image URL rejected by Anthropic API (%s). Retrying without image.",
-                exc,
-            )
-            try:
-                raw_text = _call([{"type": "text", "text": user_text}])
-            except anthropic.APIError as retry_exc:
-                raise ContentStudioError(
-                    f"Anthropic API error on retry: {retry_exc}"
-                ) from retry_exc
-        else:
-            raise ContentStudioError(f"Anthropic API error: {exc}") from exc
-    except anthropic.APIError as exc:
-        raise ContentStudioError(f"Anthropic API error: {exc}") from exc
+        raw_text = (response.choices[0].message.content or "").strip()
+    except groq.APIError as exc:
+        raise ContentStudioError(f"Groq API error: {exc}") from exc
     except Exception as exc:
-        raise ContentStudioError(f"Unexpected error calling Anthropic: {exc}") from exc
+        raise ContentStudioError(f"Unexpected error calling Groq: {exc}") from exc
 
     return _parse_content_json(raw_text)
 
@@ -301,7 +266,7 @@ def post_to_slack(product_name: str, content: dict[str, str]) -> bool:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate HoeshaHome marketing copy with Claude."
+        description="Generate HoeshaHome marketing copy with Groq."
     )
     parser.add_argument("--product", required=True, help="Product name.")
     parser.add_argument("--url", required=True, help="Product page URL.")
